@@ -113,11 +113,11 @@ export class LiveSessionManager {
             functionDeclarations: [
               {
                 name: "executeBrowserAction",
-                description: "Open a website or perform a browser action (like opening YouTube, Spotify, or WhatsApp). Call this when the user asks to open a site, play a song, or send a message.",
+                description: "Open a website or perform a browser action (like opening Google search, YouTube, Spotify, or WhatsApp). Call this when the user asks to open a site, search the web, play a song, or send a message.",
                 parameters: {
                   type: "OBJECT" as Type,
                   properties: {
-                    actionType: { type: "STRING" as Type, description: "Type of action: 'open', 'youtube', 'spotify', 'whatsapp'" },
+                    actionType: { type: "STRING" as Type, description: "Type of action: 'open', 'google', 'youtube', 'spotify', 'whatsapp'" },
                     query: { type: "STRING" as Type, description: "The search query, website name, or message content." },
                     target: { type: "STRING" as Type, description: "The target phone number for WhatsApp, if applicable." }
                   },
@@ -167,6 +167,8 @@ export class LiveSessionManager {
                   let url = "";
                   if (args.actionType === "youtube") {
                     url = `https://www.youtube.com/results?search_query=${encodeURIComponent(args.query)}`;
+                  } else if (args.actionType === "google") {
+                    url = `https://www.google.com/search?q=${encodeURIComponent(args.query)}`;
                   } else if (args.actionType === "spotify") {
                     url = `https://open.spotify.com/search/${encodeURIComponent(args.query)}`;
                   } else if (args.actionType === "whatsapp") {

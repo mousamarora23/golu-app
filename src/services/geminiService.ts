@@ -55,7 +55,7 @@ export async function getAditiResponse(prompt: string, history: { sender: "user"
     }
 
     const response = await chatSession.sendMessage({ message: prompt });
-    return response.text || "Ugh, fine. I have nothing to say.";
+    return response.text || "The AI service returned an empty response. Please try again.";
   } catch (error: any) {
     console.error("Gemini Error:", error);
     
@@ -63,10 +63,10 @@ export async function getAditiResponse(prompt: string, history: { sender: "user"
     const errMsg = (errObj.message || String(error)).toLowerCase();
     
     if (errMsg.includes('quota') || errMsg.includes('429')) {
-      return "⚠️ **Error:** You exceeded your current Gemini API quota. Please try again later or check your API billing details.";
+      return "Warning: You exceeded your current Gemini API quota. Please try again later or check your API billing details.";
     }
     
-    return "Uff, mera dimaag kharab ho gaya hai. Try again later, Mousam.";
+    return "I hit an AI service error. Try again in a moment.";
   }
 }
 
@@ -91,4 +91,3 @@ export async function getAditiAudio(text: string): Promise<string | null> {
     return null;
   }
 }
-

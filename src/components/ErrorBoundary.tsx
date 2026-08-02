@@ -11,7 +11,9 @@ interface State {
   error: Error | null;
 }
 
-export default class ErrorBoundary extends React.Component<Props, State> {
+export default class ErrorBoundary extends (Component as any) {
+  public props!: Props;
+
   public state: State = {
     hasError: false,
     error: null
@@ -26,15 +28,12 @@ export default class ErrorBoundary extends React.Component<Props, State> {
   }
 
   private handleReset = () => {
-    // @ts-ignore
     this.setState({ hasError: false, error: null });
   };
 
   public render(): ReactNode {
     if (this.state.hasError) {
-      // @ts-ignore
       if (this.props.fallback) {
-        // @ts-ignore
         return this.props.fallback;
       }
       return (
@@ -57,7 +56,6 @@ export default class ErrorBoundary extends React.Component<Props, State> {
       );
     }
 
-    // @ts-ignore
     return this.props.children;
   }
 }
