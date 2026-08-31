@@ -23,6 +23,9 @@ export const defaultUserContext: UserContext = {
 const LOCAL_STORAGE_KEY = 'golu_user_context';
 const PERSONALITY_KEY = 'golu_personality';
 const LONG_TERM_MEMORY_KEY = 'golu_long_term_memory';
+const AUTO_SPEAK_KEY = 'golu_auto_speak';
+const VOICE_NAME_KEY = 'golu_voice_name';
+const SPEECH_LANG_KEY = 'golu_speech_lang';
 const MAX_AUTO_MEMORIES = 60;
 
 export function loadUserContext(): UserContext {
@@ -43,6 +46,36 @@ export function loadPersonality(): PersonalityMode {
 
 export function savePersonality(mode: PersonalityMode) {
   localStorage.setItem(PERSONALITY_KEY, mode);
+}
+
+export function loadAutoSpeak(): boolean {
+  try {
+    const item = localStorage.getItem(AUTO_SPEAK_KEY);
+    if (item === null) return true; // Default to true: auto speak is ON
+    return item === 'true';
+  } catch {
+    return true;
+  }
+}
+
+export function saveAutoSpeak(enabled: boolean) {
+  localStorage.setItem(AUTO_SPEAK_KEY, enabled ? 'true' : 'false');
+}
+
+export function loadVoiceName(): string {
+  return localStorage.getItem(VOICE_NAME_KEY) || 'Kore';
+}
+
+export function saveVoiceName(voice: string) {
+  localStorage.setItem(VOICE_NAME_KEY, voice);
+}
+
+export function loadSpeechLang(): string {
+  return localStorage.getItem(SPEECH_LANG_KEY) || 'hi-IN';
+}
+
+export function saveSpeechLang(lang: string) {
+  localStorage.setItem(SPEECH_LANG_KEY, lang);
 }
 
 export function loadLongTermMemory(): LongTermMemory[] {

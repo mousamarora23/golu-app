@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-import { loadPersonality, loadUserContext, getSystemInstruction } from "./configService";
+import { loadPersonality, loadUserContext, getSystemInstruction, loadVoiceName } from "./configService";
 import { getGeminiApiKey } from "./env";
 
 let chatSession: any = null;
@@ -17,7 +17,7 @@ export async function getAditiResponse(prompt: string, history: { sender: "user"
       const userCtx = loadUserContext();
       const systemInstruction = getSystemInstruction(mode, userCtx);
 
-      // SLIDING WINDOW MEMORY: Keep only the last 20 messages to prevent "buffer full" (context window overflow)
+      // SLIDING WINDOW MEMORY: Keep only the last 20 messages to prevent context window overflow
       const recentHistory = history.slice(-20);
       
       let formattedHistory: any[] = [];
@@ -45,7 +45,7 @@ export async function getAditiResponse(prompt: string, history: { sender: "user"
       }
 
       chatSession = ai.chats.create({
-        model: "gemini-3-flash-preview",
+        model: "gemini-2.5-flash",
         config: {
           systemInstruction,
           tools: [{ googleSearch: {} }],
@@ -70,17 +70,27 @@ export async function getAditiResponse(prompt: string, history: { sender: "user"
   }
 }
 
-export async function getAditiAudio(text: string): Promise<string | null> {
+export async function getAditiAudio(text: string, voice?: string): Promise<string | null> {
   try {
     const ai = new GoogleGenAI({ apiKey: getGeminiApiKey() });
+    const voiceName = voice || loadVoiceName() || "Kore";
+    const cleanText = text
+      .replace(/\[[^\]]+\]\([^)]+\)/g, "")
+      .replace(/https?:\/\/\S+/g, "")
+      .replace(/[*_#`~]/g, "")
+      .trim();
+
+    if (!cleanText) return null;
+
+    // Use gemini-2.5-flash-preview-tts for direct audio generation
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: [{ parts: [{ text }] }],
+      model: "gemini-2.5-flash-preview-tts",
+      contents: [{ parts: [{ text: cleanText }] }],
       config: {
         responseModalities: ["AUDIO"],
         speechConfig: {
           voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: "Kore" },
+            prebuiltVoiceConfig: { voiceName },
           },
         },
       },

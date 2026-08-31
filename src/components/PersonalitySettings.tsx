@@ -4,32 +4,67 @@ import {
   loadLongTermMemory,
   loadUserContext,
   loadPersonality,
+  loadAutoSpeak,
+  saveAutoSpeak,
+  loadVoiceName,
+  saveVoiceName,
+  loadSpeechLang,
+  saveSpeechLang,
   removeLongTermMemory,
   saveUserContext,
   savePersonality,
 } from '../services/configService';
 import type { LongTermMemory, UserContext, PersonalityMode } from '../services/configService';
 import { deleteSyncedMemory, syncMemories } from '../services/assistantService';
-import { Settings, X, Plus, Trash2 } from 'lucide-react';
+import { Settings, X, Plus, Trash2, Volume2, Mic, Sparkles } from 'lucide-react';
 
 export default function PersonalitySettings() {
   const [isOpen, setIsOpen] = useState(false);
   const [userCtx, setUserCtx] = useState<UserContext>(loadUserContext());
   const [personality, setPersonality] = useState<PersonalityMode>(loadPersonality());
+  const [autoVoice, setAutoVoice] = useState<boolean>(loadAutoSpeak());
+  const [voiceName, setVoiceName] = useState<string>(loadVoiceName());
+  const [speechLang, setSpeechLang] = useState<string>(loadSpeechLang());
   const [autoMemories, setAutoMemories] = useState<LongTermMemory[]>(loadLongTermMemory());
   const [newMemory, setNewMemory] = useState('');
+  const [savedFeedback, setSavedFeedback] = useState(false);
 
   const personalities: PersonalityMode[] = ['assistant', 'cute', 'flirty', 'professional', 'sarcastic'];
+  const voices = [
+    { id: 'Kore', label: 'Kore (Calm Female / Default)' },
+    { id: 'Aoede', label: 'Aoede (Expressive Female)' },
+    { id: 'Fenrir', label: 'Fenrir (Deep Male)' },
+    { id: 'Puck', label: 'Puck (Playful Energetic)' },
+    { id: 'Charon', label: 'Charon (Smooth Male)' },
+  ];
+
+  const handleOpen = () => {
+    setUserCtx(loadUserContext());
+    setPersonality(loadPersonality());
+    setAutoVoice(loadAutoSpeak());
+    setVoiceName(loadVoiceName());
+    setSpeechLang(loadSpeechLang());
+    setAutoMemories(loadLongTermMemory());
+    setSavedFeedback(false);
+    setIsOpen(true);
+  };
 
   const handleSave = () => {
     saveUserContext(userCtx);
     savePersonality(personality);
+    saveAutoSpeak(autoVoice);
+    saveVoiceName(voiceName);
+    saveSpeechLang(speechLang);
+
     void syncMemories([...loadLongTermMemory(), ...manualMemoriesForSync(userCtx.memoryContext)]).catch((error) => {
       console.warn('Synced memory save failed:', error);
     });
-    setIsOpen(false);
-    // Realistically you might need a page reload or context update here
-    window.location.reload(); 
+
+    setSavedFeedback(true);
+    setTimeout(() => {
+      setIsOpen(false);
+      setSavedFeedback(false);
+    }, 600);
   };
 
   const addMemory = () => {
@@ -80,7 +115,7 @@ export default function PersonalitySettings() {
   return (
     <>
       <button 
-        onClick={() => setIsOpen(true)}
+        onClick={handleOpen}
         className="p-2 rounded-full bg-white/5 hover:bg-white/10 transition-colors border border-white/10"
         title="Settings & Persona"
       >
@@ -101,7 +136,7 @@ export default function PersonalitySettings() {
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative w-full max-w-md max-h-[85vh] overflow-y-auto bg-[#0a0a0f]/90 backdrop-blur-xl border border-white/10 rounded-3xl p-6 shadow-2xl"
+              className="relative w-full max-w-md max-h-[85vh] overflow-y-auto bg-[#0a0a0f]/95 backdrop-blur-xl border border-white/10 rounded-3xl p-6 shadow-2xl"
             >
               <button 
                 onClick={() => setIsOpen(false)}
@@ -110,11 +145,66 @@ export default function PersonalitySettings() {
                 <X size={20} className="opacity-70" />
               </button>
 
-              <h2 className="text-xl font-medium mb-6 bg-gradient-to-r from-violet-400 to-cyan-400 bg-clip-text text-transparent">
-                Data & Persona
+              <h2 className="text-xl font-medium mb-6 bg-gradient-to-r from-violet-400 to-cyan-400 bg-clip-text text-transparent flex items-center gap-2">
+                <Sparkles size={20} className="text-cyan-400" />
+                Settings & Persona
               </h2>
 
               <div className="space-y-6 text-sm text-white/80">
+                {/* Voice & Speaking Mode */}
+                <div className="space-y-3 rounded-2xl border border-cyan-400/20 bg-cyan-400/5 p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 font-medium text-cyan-200">
+                      <Volume2 size={16} />
+                      <span>Auto Voice Response for Chat</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setAutoVoice(!autoVoice)}
+                      className={`relative h-6 w-11 rounded-full transition-colors ${
+                        autoVoice ? 'bg-cyan-500' : 'bg-white/15'
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                          autoVoice ? 'translate-x-6' : 'translate-x-1'
+                        }`}
+                      />
+                    </button>
+                  </div>
+                  <p className="text-xs text-white/50">
+                    When enabled, Golu will speak chat replies out loud automatically.
+                  </p>
+
+                  <div className="pt-2 space-y-2">
+                    <label className="block text-xs uppercase tracking-wider text-cyan-200/70">AI Voice (Gemini TTS)</label>
+                    <select
+                      value={voiceName}
+                      onChange={(e) => setVoiceName(e.target.value)}
+                      className="w-full bg-black/60 border border-white/10 rounded-xl px-3 py-2 text-xs outline-none focus:border-cyan-400 text-white"
+                    >
+                      {voices.map((v) => (
+                        <option key={v.id} value={v.id} className="bg-[#0e0e14] text-white">
+                          {v.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="block text-xs uppercase tracking-wider text-cyan-200/70">Speech Dictation Language</label>
+                    <select
+                      value={speechLang}
+                      onChange={(e) => setSpeechLang(e.target.value)}
+                      className="w-full bg-black/60 border border-white/10 rounded-xl px-3 py-2 text-xs outline-none focus:border-cyan-400 text-white"
+                    >
+                      <option value="hi-IN" className="bg-[#0e0e14]">Hindi / Hinglish (hi-IN)</option>
+                      <option value="en-IN" className="bg-[#0e0e14]">Indian English (en-IN)</option>
+                      <option value="en-US" className="bg-[#0e0e14]">US English (en-US)</option>
+                    </select>
+                  </div>
+                </div>
+
                 {/* Personality */}
                 <div className="space-y-2">
                   <label className="block text-xs uppercase tracking-wider text-white/50">Persona Mode</label>
@@ -151,13 +241,13 @@ export default function PersonalitySettings() {
                   <select 
                     value={userCtx.relationshipStage}
                     onChange={(e) => setUserCtx(p => ({ ...p, relationshipStage: e.target.value as any }))}
-                    className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 outline-none focus:border-violet-500 transition-colors appearance-none"
+                    className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 outline-none focus:border-violet-500 transition-colors"
                   >
-                    <option value="stranger">Stranger (Formal)</option>
-                    <option value="acquaintance">Acquaintance (Polite)</option>
-                    <option value="friend">Friend (Casual interactions)</option>
-                    <option value="close">Close Friend (Playful & direct)</option>
-                    <option value="partner">Partner (Deeply affectionate)</option>
+                    <option value="stranger" className="bg-[#0e0e14]">Stranger (Formal)</option>
+                    <option value="acquaintance" className="bg-[#0e0e14]">Acquaintance (Polite)</option>
+                    <option value="friend" className="bg-[#0e0e14]">Friend (Casual interactions)</option>
+                    <option value="close" className="bg-[#0e0e14]">Close Friend (Playful & direct)</option>
+                    <option value="partner" className="bg-[#0e0e14]">Partner (Deeply affectionate)</option>
                   </select>
                 </div>
 
@@ -217,9 +307,9 @@ export default function PersonalitySettings() {
                 <div className="pt-4">
                   <button 
                     onClick={handleSave}
-                    className="w-full py-3 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 font-medium hover:opacity-90 transition-opacity shadow-[0_0_20px_rgba(139,92,246,0.3)]"
+                    className="w-full py-3 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 font-medium hover:opacity-90 transition-opacity shadow-[0_0_20px_rgba(139,92,246,0.3)] flex items-center justify-center gap-2"
                   >
-                    Save & Apply Settings
+                    {savedFeedback ? "Saved & Applied!" : "Save & Apply Settings"}
                   </button>
                 </div>
               </div>

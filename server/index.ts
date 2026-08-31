@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer as createViteServer } from "vite";
+import { GoogleGenAI } from "@google/genai";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -91,6 +92,13 @@ function firstConfiguredEnv(...names: string[]) {
   return undefined;
 }
 
+function getGeminiConfig() {
+  return {
+    apiKey: firstConfiguredEnv("GEMINI_API_KEY", "VITE_GEMINI_API_KEY"),
+    model: firstConfiguredEnv("GEMINI_MODEL") || "gemini-2.5-flash",
+  };
+}
+
 function getGoogleConfig() {
   return {
     key: firstConfiguredEnv("GOOGLE_API_KEY", "GOOGLE_SEARCH_API_KEY"),
@@ -123,6 +131,7 @@ function getOpenAIConfig() {
 }
 
 function appStatus(req?: Request) {
+  const gemini = getGeminiConfig();
   const google = getGoogleConfig();
   const spotify = getSpotifyConfig();
   const openai = getOpenAIConfig();
@@ -130,6 +139,11 @@ function appStatus(req?: Request) {
     isConfigured(spotify.clientId) && isConfigured(spotify.clientSecret);
 
   return {
+    gemini: {
+      configured: isConfigured(gemini.apiKey),
+      model: gemini.model,
+      missing: isConfigured(gemini.apiKey) ? [] : ["GEMINI_API_KEY"],
+    },
     openai: {
       configured: isConfigured(openai.apiKey),
       model: openai.model,
@@ -244,56 +258,93 @@ app.post("/api/chat", async (req, res) => {
 
   try {
     const live = await getLiveContext(message, body.clientTimezone);
+    const gemini = getGeminiConfig();
     const openai = getOpenAIConfig();
-
-    if (!isConfigured(openai.apiKey)) {
-      if (live?.answer) {
-        res.json({
-          text: live.answer,
-          provider: "live",
-          model: "deterministic-live-data",
-          searchResults: [],
-          searchConfigured: false,
-          liveContext: live,
-        });
-        return;
-      }
-
-      res.status(503).json({
-        error:
-          "OpenAI is not configured. Set OPENAI_API_KEY in .env.local to enable ChatGPT responses.",
-      });
-      return;
-    }
+    const serverMemories = await readServerMemories();
 
     const search = body.useWebSearch || live?.kind === "live"
       ? await safeSearchGoogle(message)
       : null;
-    const serverMemories = await readServerMemories();
-    const text = await askOpenAI({
-      message,
-      history: body.history || [],
-      systemInstruction: appendServerMemoryToInstruction(
-        ensureAssistantEnhancementLayer(body.systemInstruction || defaultSystemInstruction()),
-        serverMemories,
-      ),
-      searchResults: search?.results || [],
-      searchError: search?.error,
-      liveContext: live,
-    });
 
-    res.json({
-      text,
-      provider: "openai",
-      model: openai.model,
-      searchResults: search?.results || [],
-      searchConfigured: search?.configured || false,
-      searchError: search?.error,
-      liveContext: live,
+    const fullInstruction = appendServerMemoryToInstruction(
+      ensureAssistantEnhancementLayer(body.systemInstruction || defaultSystemInstruction()),
+      serverMemories,
+    );
+
+    // If Gemini key is configured, use Gemini
+    if (isConfigured(gemini.apiKey)) {
+      try {
+        const text = await askGemini({
+          apiKey: gemini.apiKey as string,
+          model: gemini.model,
+          message,
+          history: body.history || [],
+          systemInstruction: fullInstruction,
+          searchResults: search?.results || [],
+          searchError: search?.error,
+          liveContext: live,
+        });
+
+        res.json({
+          text,
+          provider: "gemini",
+          model: gemini.model,
+          searchResults: search?.results || [],
+          searchConfigured: search?.configured || false,
+          searchError: search?.error,
+          liveContext: live,
+        });
+        return;
+      } catch (geminiError) {
+        console.error("Gemini server error:", geminiError);
+        // If OpenAI is also configured, try fallback to OpenAI
+        if (!isConfigured(openai.apiKey)) {
+          throw geminiError;
+        }
+      }
+    }
+
+    if (isConfigured(openai.apiKey)) {
+      const text = await askOpenAI({
+        message,
+        history: body.history || [],
+        systemInstruction: fullInstruction,
+        searchResults: search?.results || [],
+        searchError: search?.error,
+        liveContext: live,
+      });
+
+      res.json({
+        text,
+        provider: "openai",
+        model: openai.model,
+        searchResults: search?.results || [],
+        searchConfigured: search?.configured || false,
+        searchError: search?.error,
+        liveContext: live,
+      });
+      return;
+    }
+
+    if (live?.answer) {
+      res.json({
+        text: live.answer,
+        provider: "live",
+        model: "deterministic-live-data",
+        searchResults: [],
+        searchConfigured: false,
+        liveContext: live,
+      });
+      return;
+    }
+
+    res.status(503).json({
+      error:
+        "AI provider is not configured. Set GEMINI_API_KEY or OPENAI_API_KEY in .env.local to enable responses.",
     });
   } catch (error) {
     res.status(500).json({
-      error: error instanceof Error ? error.message : "OpenAI request failed.",
+      error: error instanceof Error ? error.message : "Chat request failed.",
     });
   }
 });
@@ -394,6 +445,68 @@ app.post("/api/spotify/play", async (req, res) => {
     });
   }
 });
+
+async function askGemini(args: {
+  apiKey: string;
+  model: string;
+  message: string;
+  history: ChatHistoryItem[];
+  systemInstruction: string;
+  searchResults: SearchResult[];
+  searchError?: string;
+  liveContext?: LiveContext | null;
+}) {
+  const ai = new GoogleGenAI({ apiKey: args.apiKey });
+  const recentHistory = args.history.slice(-20);
+  const formattedHistory: any[] = [];
+  let currentRole = "";
+  let currentText = "";
+
+  for (const msg of recentHistory) {
+    const role = msg.sender === "user" ? "user" : "model";
+    if (role === currentRole) {
+      currentText += "\n" + msg.text;
+    } else {
+      if (currentRole !== "") {
+        formattedHistory.push({ role: currentRole, parts: [{ text: currentText }] });
+      }
+      currentRole = role;
+      currentText = msg.text;
+    }
+  }
+  if (currentRole !== "") {
+    formattedHistory.push({ role: currentRole, parts: [{ text: currentText }] });
+  }
+  if (formattedHistory.length > 0 && formattedHistory[0].role !== "user") {
+    formattedHistory.shift();
+  }
+
+  let prompt = args.message;
+  if (args.liveContext?.answer) {
+    prompt = `[Verified Live Data: ${args.liveContext.answer}]\n${prompt}`;
+  } else if (args.liveContext) {
+    prompt = `[Live Context: ${JSON.stringify(args.liveContext)}]\n${prompt}`;
+  }
+  if (args.searchResults?.length) {
+    const searchContext = args.searchResults
+      .map((r, i) => `${i + 1}. ${r.title} (${r.link}): ${r.snippet}`)
+      .join("\n");
+    prompt = `[Google Search Grounding Results:\n${searchContext}]\n\n${prompt}`;
+  }
+
+  const systemInstruction = `${args.systemInstruction}\n\nREAL-TIME ACCURACY RULES:\n- For current time, date, weather, temperature, or live factual queries, use the verified live data context first.\n- Keep answers natural, warm, clear, and well-structured.`;
+  const chat = ai.chats.create({
+    model: args.model || "gemini-2.5-flash",
+    config: {
+      systemInstruction,
+      tools: [{ googleSearch: {} }],
+    },
+    history: formattedHistory,
+  });
+
+  const response = await chat.sendMessage({ message: prompt });
+  return response.text || "I processed your request.";
+}
 
 async function askOpenAI(args: {
   message: string;
@@ -1224,3 +1337,5 @@ start().catch((error) => {
   console.error(error);
   process.exit(1);
 });
+
+export default app;

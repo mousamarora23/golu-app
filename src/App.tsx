@@ -11,6 +11,8 @@ import {
   Radio,
   Search,
   Send,
+  Sparkles,
+  Square,
   Trash2,
   Volume2,
   VolumeX,
@@ -36,8 +38,16 @@ import PermissionModal from "./components/PermissionModal";
 import LiveAvatar from "./components/LiveAvatar";
 import PersonalitySettings from "./components/PersonalitySettings";
 import ErrorBoundary from "./components/ErrorBoundary";
-import { playPCM } from "./utils/audioUtils";
-import { loadLongTermMemory, rememberFromUserMessage, saveLongTermMemory } from "./services/configService";
+import { playPCM, stopPCM, isPCMPlaying, getPCMVolume } from "./utils/audioUtils";
+import {
+  loadAutoSpeak,
+  loadLongTermMemory,
+  loadSpeechLang,
+  loadVoiceName,
+  rememberFromUserMessage,
+  saveAutoSpeak,
+  saveLongTermMemory,
+} from "./services/configService";
 
 type AppState = "idle" | "listening" | "processing" | "speaking";
 type Provider = "openai" | "gemini" | "browser" | "system" | "live";
@@ -99,12 +109,15 @@ function stabilizeAssistantText(text: string) {
   return deduped.join(" ").trim() || cleaned;
 }
 
-async function speakWithBrowser(text: string) {
+async function speakWithBrowser(text: string): Promise<void> {
   const spokenText = getSpeechText(text);
   if (!spokenText || !("speechSynthesis" in window)) return;
 
   await new Promise<void>((resolve) => {
-    window.speechSynthesis.cancel();
+    try {
+      window.speechSynthesis.cancel();
+    } catch {}
+
     let settled = false;
     let timeout = 0;
     const finish = () => {
@@ -113,15 +126,23 @@ async function speakWithBrowser(text: string) {
       window.clearTimeout(timeout);
       resolve();
     };
+
     const utterance = new SpeechSynthesisUtterance(spokenText);
     const voices = window.speechSynthesis.getVoices();
-    const preferredVoice = voices.find((voice) => /female|zira|samantha|google us english/i.test(voice.name));
+    
+    // Choose Hindi/Indian English voice first, or good natural English voice
+    const preferredVoice =
+      voices.find((v) => /hi-IN|hindi|swara|kalpana|madhur|heera|neerja/i.test(v.lang || v.name)) ||
+      voices.find((v) => /en-IN|indian|veena|ravi/i.test(v.lang || v.name)) ||
+      voices.find((v) => /female|zira|samantha|google us english|google uk english/i.test(v.name)) ||
+      voices[0];
+
     if (preferredVoice) utterance.voice = preferredVoice;
-    utterance.rate = 0.95;
-    utterance.pitch = 1;
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
     utterance.onend = finish;
     utterance.onerror = finish;
-    timeout = window.setTimeout(finish, Math.max(6000, spokenText.length * 90));
+    timeout = window.setTimeout(finish, Math.max(5000, spokenText.length * 80));
     window.speechSynthesis.speak(utterance);
   });
 }
@@ -140,7 +161,7 @@ function LinkifiedText({ text }: { text: string }) {
             href={part}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-cyan-200 underline underline-offset-4 hover:text-white"
+            className="text-cyan-200 underline underline-offset-4 hover:text-white break-all"
           >
             {part}
           </a>
@@ -281,6 +302,8 @@ export default function App() {
   const [appState, setAppState] = useState<AppState>("idle");
   const [isReady, setIsReady] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
+  const [autoSpeak, setAutoSpeak] = useState<boolean>(() => loadAutoSpeak());
+  const [playingMessageId, setPlayingMessageId] = useState<string | null>(null);
   const [showTextInput, setShowTextInput] = useState(true);
   const [textInput, setTextInput] = useState("");
   const [showPermissionModal, setShowPermissionModal] = useState(false);
@@ -294,6 +317,11 @@ export default function App() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const latestDictationRef = useRef("");
   const dictationHadErrorRef = useRef(false);
+  const autoSpeakRef = useRef(autoSpeak);
+
+  useEffect(() => {
+    autoSpeakRef.current = autoSpeak;
+  }, [autoSpeak]);
 
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     const saved = localStorage.getItem(chatStorageKey);
@@ -315,10 +343,11 @@ export default function App() {
   });
   const messagesRef = useRef(messages);
 
-  const handleGetVolume = useCallback(
-    () => (liveSessionRef.current ? liveSessionRef.current.getVolume() : 0),
-    [],
-  );
+  const handleGetVolume = useCallback(() => {
+    if (liveSessionRef.current) return liveSessionRef.current.getVolume();
+    if (isPCMPlaying()) return getPCMVolume();
+    return 0;
+  }, []);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setIsReady(true), 1800);
@@ -328,11 +357,11 @@ export default function App() {
   useEffect(() => {
     const refreshStatus = () => {
       getAssistantStatus()
-      .then(setAssistantStatus)
-      .catch((error) => {
-        console.warn("Assistant status unavailable:", error);
-        setAssistantStatus(null);
-      });
+        .then(setAssistantStatus)
+        .catch((error) => {
+          console.warn("Assistant status unavailable:", error);
+          setAssistantStatus(null);
+        });
     };
 
     refreshStatus();
@@ -360,47 +389,69 @@ export default function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, appState]);
 
+  const stopSpeaking = useCallback(() => {
+    stopPCM();
+    if ("speechSynthesis" in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {}
+    }
+    setPlayingMessageId(null);
+    setAppState("idle");
+  }, []);
+
   useEffect(() => {
     if (liveSessionRef.current) {
       liveSessionRef.current.isMuted = isMuted;
     }
-    if (isMuted && "speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
+    if (isMuted) {
+      stopSpeaking();
     }
-  }, [isMuted]);
+  }, [isMuted, stopSpeaking]);
 
   useEffect(() => {
     return () => {
       liveSessionRef.current?.stop();
       recognitionRef.current?.abort?.();
-      if ("speechSynthesis" in window) {
-        window.speechSynthesis.cancel();
-      }
+      stopSpeaking();
     };
-  }, []);
+  }, [stopSpeaking]);
 
   const addMessage = useCallback((message: ChatMessage) => {
     setMessages((prev) => [...prev, message].slice(-80));
   }, []);
 
   const speakResponse = useCallback(
-    async (text: string, provider: Provider = "browser") => {
+    async (text: string, provider: Provider = "gemini", messageId?: string) => {
       if (isMuted || !text.trim()) return;
 
+      stopSpeaking();
+      if (messageId) setPlayingMessageId(messageId);
       setAppState("speaking");
-      if (provider === "gemini") {
-        const audioBase64 = await getAditiAudio(text);
+
+      try {
+        const voiceName = loadVoiceName() || "Kore";
+        const audioBase64 = await getAditiAudio(text, voiceName);
         if (audioBase64) {
           await playPCM(audioBase64);
           setAppState("idle");
+          setPlayingMessageId(null);
           return;
         }
+      } catch (err) {
+        console.warn("TTS audio playback failed, falling back to browser speech:", err);
       }
 
-      await speakWithBrowser(text);
-      setAppState("idle");
+      try {
+        await speakWithBrowser(text);
+      } catch (err) {
+        console.warn("Browser speech error:", err);
+      } finally {
+        setAppState("idle");
+        setPlayingMessageId(null);
+      }
     },
-    [isMuted],
+    [isMuted, stopSpeaking],
   );
 
   const handleSpotifyPlay = useCallback(
@@ -410,13 +461,16 @@ export default function App() {
       try {
         await playSpotifyUri(item.uri);
         const text = `Starting "${item.name}" in Spotify.`;
+        const playMsgId = createMessageId("-spotify-play");
         addMessage({
-          id: createMessageId("-spotify-play"),
+          id: playMsgId,
           sender: "golu",
           provider: "browser",
           text,
         });
-        await speakResponse(text, "browser");
+        if (autoSpeakRef.current && !isMuted) {
+          await speakResponse(text, "browser", playMsgId);
+        }
       } catch (error) {
         const text = `${
           error instanceof Error ? error.message : "Spotify playback failed."
@@ -432,7 +486,7 @@ export default function App() {
         setAppState("idle");
       }
     },
-    [addMessage, speakResponse],
+    [addMessage, isMuted, speakResponse],
   );
 
   const handleTextCommand = useCallback(
@@ -494,8 +548,9 @@ export default function App() {
           }`;
         }
 
+        const cmdMsgId = createMessageId("-a");
         addMessage({
-          id: createMessageId("-a"),
+          id: cmdMsgId,
           sender: "golu",
           text,
           provider: "browser",
@@ -503,7 +558,9 @@ export default function App() {
           sources,
           spotifyResults,
         });
-        await speakResponse(text, "browser");
+        if (autoSpeakRef.current && !isMuted) {
+          await speakResponse(text, "browser", cmdMsgId);
+        }
         setAppState("idle");
         return;
       }
@@ -512,34 +569,39 @@ export default function App() {
         const response = await getAssistantResponse(prompt, history, {
           useWebSearch: shouldUseWebSearch(prompt),
         });
+        const replyText = stabilizeAssistantText(response.text);
+        const replyMsgId = createMessageId("-a");
         addMessage({
-          id: createMessageId("-a"),
+          id: replyMsgId,
           sender: "golu",
-          text: stabilizeAssistantText(response.text),
+          text: replyText,
           provider: response.provider,
           sources: response.searchResults,
           liveContext: response.liveContext,
         });
-        await speakResponse(response.text, "browser");
+        if (autoSpeakRef.current && !isMuted) {
+          await speakResponse(replyText, response.provider, replyMsgId);
+        }
       } catch (error) {
-        console.warn("OpenAI assistant unavailable, trying Gemini fallback:", error);
+        console.warn("Assistant response fallback to Gemini:", error);
         const fallbackText = await getAditiResponse(prompt, history);
-        const prefix =
-          error instanceof Error && error.message.includes("OpenAI is not configured")
-            ? "OpenAI is not configured yet, so I used the existing Gemini fallback.\n\n"
-            : "";
+        const replyMsgId = createMessageId("-a");
         addMessage({
-          id: createMessageId("-a"),
+          id: replyMsgId,
           sender: "golu",
-          text: `${prefix}${fallbackText}`,
+          text: fallbackText,
           provider: "gemini",
         });
-        await speakResponse(fallbackText, "gemini");
+        if (autoSpeakRef.current && !isMuted) {
+          await speakResponse(fallbackText, "gemini", replyMsgId);
+        }
       } finally {
-        setAppState("idle");
+        if (!isPCMPlaying()) {
+          setAppState("idle");
+        }
       }
     },
-    [addMessage, isSessionActive, speakResponse],
+    [addMessage, isMuted, isSessionActive, speakResponse],
   );
 
   const startDictation = useCallback(() => {
@@ -562,7 +624,7 @@ export default function App() {
     latestDictationRef.current = "";
     dictationHadErrorRef.current = false;
     const recognition = new Recognition();
-    recognition.lang = "en-US";
+    recognition.lang = loadSpeechLang() || "hi-IN";
     recognition.interimResults = true;
     recognition.continuous = false;
 
@@ -835,7 +897,12 @@ export default function App() {
 
         <div className="flex items-center gap-2">
           <div className="hidden items-center gap-2 lg:flex">
-            <SetupPill label={`OpenAI ${assistantStatus?.openai.model || ""}`} configured={assistantStatus?.openai.configured} />
+            {assistantStatus?.gemini?.configured && (
+              <SetupPill label="Gemini 2.5 Flash" configured={true} />
+            )}
+            {assistantStatus?.openai?.configured && (
+              <SetupPill label={`OpenAI ${assistantStatus?.openai.model || ""}`} configured={true} />
+            )}
             <SetupPill label="Google" configured={assistantStatus?.google.configured} />
             <SetupPill
               label={assistantStatus?.spotify.connected ? "Spotify connected" : "Spotify"}
@@ -857,6 +924,7 @@ export default function App() {
                 if (confirm("Clear chat history?")) {
                   setMessages([]);
                   resetAditiSession();
+                  stopSpeaking();
                 }
               }}
               className="rounded-full border border-white/10 bg-white/5 p-2 transition-colors hover:bg-red-500/20 hover:text-red-400"
@@ -866,12 +934,16 @@ export default function App() {
             </button>
           )}
           <button
-            onClick={() => setIsMuted(!isMuted)}
+            onClick={() => {
+              const next = !isMuted;
+              setIsMuted(next);
+              if (next) stopSpeaking();
+            }}
             className="rounded-full border border-white/10 bg-white/5 p-2 transition-colors hover:bg-white/10"
-            title={isMuted ? "Unmute" : "Mute"}
+            title={isMuted ? "Unmute sound" : "Mute sound"}
           >
             {isMuted ? (
-              <VolumeX size={18} className="opacity-70" />
+              <VolumeX size={18} className="text-red-400 opacity-90" />
             ) : (
               <Volume2 size={18} className="opacity-70" />
             )}
@@ -911,40 +983,100 @@ export default function App() {
         initial={{ opacity: 0, x: 30 }}
         animate={{ opacity: isReady ? 1 : 0, x: isReady ? 0 : 30 }}
         transition={{ duration: 0.8, delay: 0.55 }}
-        className="absolute inset-x-3 bottom-32 top-[5.25rem] z-20 flex flex-col rounded-2xl border border-white/10 bg-black/50 shadow-2xl shadow-black/30 backdrop-blur-2xl sm:left-auto sm:right-4 sm:w-[min(480px,calc(100vw-2rem))] md:right-6 md:top-20"
+        className="absolute inset-x-3 bottom-24 top-[4.75rem] z-20 flex flex-col overflow-hidden rounded-2xl border border-white/10 bg-black/60 shadow-2xl shadow-black/40 backdrop-blur-2xl sm:left-auto sm:right-4 sm:w-[460px] sm:max-w-[calc(100vw-2rem)] md:bottom-28 md:right-6 md:top-20"
       >
-        <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
+        <div className="flex shrink-0 items-center justify-between border-b border-white/10 bg-black/30 px-4 py-3">
           <div className="flex items-center gap-2 text-sm font-semibold text-white/90">
             <Bot size={18} className="text-cyan-200" />
             Assistant Chat
           </div>
-          <div className="flex items-center gap-2 text-xs text-white/45">
-            {appState === "processing" && <Loader2 size={14} className="animate-spin" />}
-            {isDictating ? "Dictating" : assistantStatus?.openai.configured ? "ChatGPT" : "Gemini fallback"}
+          <div className="flex items-center gap-2 text-xs">
+            {appState === "processing" && <Loader2 size={14} className="animate-spin text-cyan-300" />}
+            {appState === "speaking" && (
+              <span className="flex items-center gap-1 font-medium text-cyan-300">
+                <Volume2 size={13} className="animate-bounce" />
+                Speaking...
+              </span>
+            )}
+            {/* Auto Voice Response Toggle */}
+            <button
+              type="button"
+              onClick={() => {
+                const next = !autoSpeak;
+                setAutoSpeak(next);
+                saveAutoSpeak(next);
+                if (!next) stopSpeaking();
+              }}
+              className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium border transition-all ${
+                autoSpeak
+                  ? "border-cyan-400/40 bg-cyan-400/15 text-cyan-200 shadow-[0_0_12px_rgba(34,211,238,0.25)]"
+                  : "border-white/10 bg-white/5 text-white/40 hover:bg-white/10 hover:text-white/70"
+              }`}
+              title={autoSpeak ? "Auto Voice Response: ON (Golu bol kar jawab dega)" : "Auto Voice Response: OFF (Silent text)"}
+            >
+              <Volume2 size={12} className={autoSpeak ? "text-cyan-300" : "opacity-40"} />
+              <span>{autoSpeak ? "Voice ON" : "Voice OFF"}</span>
+            </button>
           </div>
         </div>
 
-        <div className="scrollbar-hide flex-1 space-y-4 overflow-y-auto px-4 py-4">
+        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-3.5 overscroll-contain">
           {messages.map((message) => {
             const isUser = message.sender === "user";
+            const isThisPlaying = playingMessageId === message.id;
+
             return (
               <div
                 key={message.id}
-                className={`flex ${isUser ? "justify-end" : "justify-start"}`}
+                className={`flex w-full ${isUser ? "justify-end" : "justify-start"}`}
               >
                 <div
-                  className={`max-w-[88%] rounded-2xl border px-4 py-3 text-sm leading-relaxed shadow-lg ${
+                  className={`max-w-[85%] rounded-2xl border px-4 py-3 text-sm leading-relaxed shadow-lg break-words [overflow-wrap:anywhere] ${
                     isUser
-                      ? "border-violet-300/20 bg-violet-500/20 text-white"
-                      : "border-white/10 bg-white/8 text-white/85"
+                      ? "border-violet-300/20 bg-violet-500/20 text-white rounded-br-sm"
+                      : "border-white/10 bg-white/8 text-white/85 rounded-bl-sm"
                   }`}
                 >
                   {!isUser && (
-                    <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-cyan-200/70">
-                      <span>{message.provider === "openai" ? "OpenAI" : message.provider === "live" ? "Live data" : message.provider === "gemini" ? "Gemini" : "Golu"}</span>
+                    <div className="mb-2 flex items-center justify-between gap-2 border-b border-white/5 pb-1.5">
+                      <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.18em] text-cyan-200/70">
+                        <span>
+                          {message.provider === "openai"
+                            ? "OpenAI"
+                            : message.provider === "live"
+                              ? "Live data"
+                              : message.provider === "gemini"
+                                ? "Gemini"
+                                : "Golu"}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (isThisPlaying) {
+                              stopSpeaking();
+                            } else {
+                              void speakResponse(message.text, message.provider, message.id);
+                            }
+                          }}
+                          className={`rounded-full p-1 text-xs transition-all ${
+                            isThisPlaying
+                              ? "bg-cyan-400/25 text-cyan-200 ring-1 ring-cyan-400/60"
+                              : "text-white/40 hover:bg-white/10 hover:text-cyan-200"
+                          }`}
+                          title={isThisPlaying ? "Stop voice" : "Listen to response"}
+                        >
+                          {isThisPlaying ? (
+                            <Square size={12} className="fill-current text-cyan-300 animate-pulse" />
+                          ) : (
+                            <Volume2 size={13} />
+                          )}
+                        </button>
+                      </div>
                     </div>
                   )}
-                  <div className="whitespace-pre-wrap">
+                  <div className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                     <LinkifiedText text={message.text} />
                   </div>
                   {message.links?.length ? (
@@ -978,7 +1110,7 @@ export default function App() {
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: isReady ? 1 : 0, y: isReady ? 0 : 20 }}
         transition={{ duration: 0.9, delay: 0.65 }}
-        className="absolute bottom-0 left-0 z-30 flex w-full shrink-0 flex-col items-center justify-center gap-4 px-3 pb-5 md:pb-7"
+        className="absolute bottom-0 left-0 z-30 flex w-full shrink-0 flex-col items-center justify-center gap-3 px-3 pb-5 md:pb-7"
       >
         <AnimatePresence>
           {showTextInput && (

@@ -28,6 +28,11 @@ export interface LiveContext {
 }
 
 export interface AssistantStatus {
+  gemini?: {
+    configured: boolean;
+    model: string;
+    missing?: string[];
+  };
   openai: {
     configured: boolean;
     model: string;
@@ -52,7 +57,7 @@ export interface ChatHistoryItem {
 
 export interface AssistantResponse {
   text: string;
-  provider: "openai" | "live";
+  provider: "openai" | "gemini" | "live";
   model: string;
   searchResults: SearchResult[];
   searchConfigured: boolean;
@@ -71,7 +76,9 @@ export async function getAssistantStatus(): Promise<AssistantStatus> {
 export async function getAssistantResponse(
   message: string,
   history: ChatHistoryItem[],
-  options: { useWebSearch?: boolean } = {},
+  options: {
+    useWebSearch?: boolean;
+  } = {},
 ): Promise<AssistantResponse> {
   const userContext = loadUserContext();
   const personality = loadPersonality();
