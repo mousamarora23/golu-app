@@ -1370,5 +1370,4 @@ if (!process.env.VERCEL) {
     process.exit(1);
   });
 }
-
 export default app;
