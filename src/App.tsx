@@ -1,13 +1,16 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   Bot,
+  Download,
   ExternalLink,
+  FileText,
   Globe2,
   Keyboard,
   Loader2,
   Mic,
   MicOff,
   Music2,
+  Paperclip,
   Radio,
   Search,
   Send,
@@ -16,6 +19,7 @@ import {
   Trash2,
   Volume2,
   VolumeX,
+  X,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { getAditiResponse, getAditiAudio, resetAditiSession } from "./services/geminiService";
@@ -23,6 +27,7 @@ import { processCommand } from "./services/commandService";
 import { LiveSessionManager } from "./services/liveService";
 import {
   AssistantStatus,
+  GeneratedPdf,
   LiveContext,
   SearchResult,
   SpotifyResult,
@@ -34,6 +39,14 @@ import {
   searchSpotify,
   syncMemories,
 } from "./services/assistantService";
+import {
+  extractPdfFromBuffer,
+  getRelevantPdfContext,
+  generatePdfDocument,
+  downloadPdf,
+  openPdfInNewTab,
+  ExtractedPdf,
+} from "./services/pdfService";
 import PermissionModal from "./components/PermissionModal";
 import LiveAvatar from "./components/LiveAvatar";
 import PersonalitySettings from "./components/PersonalitySettings";
@@ -61,6 +74,7 @@ interface ChatMessage {
   sources?: SearchResult[];
   spotifyResults?: SpotifyResult[];
   liveContext?: LiveContext;
+  generatedPdf?: GeneratedPdf;
 }
 
 declare global {
@@ -312,6 +326,15 @@ export default function App() {
   const [isDictating, setIsDictating] = useState(false);
   const [assistantStatus, setAssistantStatus] = useState<AssistantStatus | null>(null);
 
+  const [activePdf, setActivePdf] = useState<ExtractedPdf | null>(null);
+  const [isUploadingPdf, setIsUploadingPdf] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const activePdfRef = useRef<ExtractedPdf | null>(null);
+
+  useEffect(() => {
+    activePdfRef.current = activePdf;
+  }, [activePdf]);
+
   const liveSessionRef = useRef<LiveSessionManager | null>(null);
   const recognitionRef = useRef<any>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -489,6 +512,76 @@ export default function App() {
     [addMessage, isMuted, speakResponse],
   );
 
+  const handlePdfFile = useCallback(
+    async (file: File) => {
+      if (!file.name.toLowerCase().endsWith(".pdf") && file.type !== "application/pdf") {
+        addMessage({
+          id: createMessageId("-pdf-err"),
+          sender: "golu",
+          provider: "system",
+          text: "⚠️ Please upload a valid `.pdf` document.",
+        });
+        return;
+      }
+
+      setIsUploadingPdf(true);
+      setAppState("processing");
+
+      try {
+        const buffer = await file.arrayBuffer();
+        const extracted = await extractPdfFromBuffer(buffer, file.name);
+        setActivePdf(extracted);
+
+        const welcomePdfMsg = extracted.isScanned
+          ? `📄 **Attached:** ${extracted.title}.pdf (${extracted.totalPages} ${extracted.totalPages === 1 ? "page" : "pages"}, ~${extracted.wordCount.toLocaleString()} words · *OCR Processed*)\n\nYou can now ask questions, request summaries, or find information from this document!`
+          : `📄 **Attached:** ${extracted.title}.pdf (${extracted.totalPages} ${extracted.totalPages === 1 ? "page" : "pages"}, ~${extracted.wordCount.toLocaleString()} words)\n\nYou can now ask questions, request summaries, or find information from this document!`;
+        const playMsgId = createMessageId("-pdf-ok");
+        addMessage({
+          id: playMsgId,
+          sender: "golu",
+          provider: "system",
+          text: welcomePdfMsg,
+        });
+
+        if (autoSpeakRef.current && !isMuted) {
+          await speakResponse(
+            `I have attached ${extracted.title}. What would you like to know from it?`,
+            "gemini",
+            playMsgId,
+          );
+        }
+      } catch (error: any) {
+        console.error("PDF upload error:", error);
+        addMessage({
+          id: createMessageId("-pdf-err"),
+          sender: "golu",
+          provider: "system",
+          text: `⚠️ PDF Error: ${error?.message || "Failed to process PDF."}`,
+        });
+      } finally {
+        setIsUploadingPdf(false);
+        setAppState("idle");
+      }
+    },
+    [addMessage, isMuted, speakResponse],
+  );
+
+  const exportMessageAsPdf = useCallback((text: string, defaultTitle = "Golu AI Notes") => {
+    try {
+      const titleMatch = text.match(/^#+\s+(.+)$/m) || text.match(/^([^\n]{5,50})/);
+      const title = titleMatch ? titleMatch[1].replace(/[*_#]/g, "").trim() : defaultTitle;
+      const pdf = generatePdfDocument({
+        title,
+        subtitle: "Exported from Golu AI Conversation",
+        content: text,
+      });
+      downloadPdf(pdf.blob, pdf.filename);
+    } catch (error) {
+      console.error("Failed to export message as PDF:", error);
+    }
+  }, []);
+
+
   const handleTextCommand = useCallback(
     async (finalTranscript: string) => {
       const prompt = finalTranscript.trim();
@@ -514,6 +607,76 @@ export default function App() {
       setAppState("processing");
 
       const commandResult = processCommand(prompt);
+
+      // Handle PDF Creation Command
+      if (commandResult.kind === "create-pdf") {
+        const topic = commandResult.query || "Summary Notes";
+        let documentContent = "";
+
+        try {
+          const generatePrompt = activePdfRef.current
+            ? `Please generate a structured, comprehensive document about "${topic}" based on the attached document content. Use clear headings (#, ##), bullet points, and insightful paragraphs.`
+            : `Please create a structured, comprehensive document about "${topic}". Include an Introduction, Key Highlights, Detailed Insights, and a Conclusion. Use clear markdown headings (#, ##), bullet points, and well-written paragraphs.`;
+
+          const pdfContext = activePdfRef.current
+            ? getRelevantPdfContext(activePdfRef.current, generatePrompt)
+            : undefined;
+
+          const response = await getAssistantResponse(generatePrompt, history, {
+            pdfContext,
+            useWebSearch: shouldUseWebSearch(topic),
+          });
+          documentContent = response.text;
+        } catch (err) {
+          console.warn("AI generation for PDF fallback:", err);
+          documentContent = await getAditiResponse(
+            `Create a detailed document about ${topic} with headings and bullet points.`,
+            history,
+          );
+        }
+
+        try {
+          const generated = generatePdfDocument({
+            title: topic,
+            subtitle: "Generated by Golu AI",
+            content: documentContent,
+          });
+
+          const replyText = `📄 I have generated your PDF document on **${topic}**.\n\n${stabilizeAssistantText(documentContent)}`;
+          const replyMsgId = createMessageId("-pdf-gen");
+          addMessage({
+            id: replyMsgId,
+            sender: "golu",
+            text: replyText,
+            provider: "gemini",
+            generatedPdf: {
+              title: generated.title,
+              filename: generated.filename,
+              url: generated.url,
+              sizeKb: generated.sizeKb,
+            },
+          });
+
+          if (autoSpeakRef.current && !isMuted) {
+            await speakResponse(`I have generated the PDF for ${topic}. You can download it now.`, "gemini", replyMsgId);
+          }
+        } catch (pdfErr) {
+          console.error("PDF generation failed:", pdfErr);
+          const replyMsgId = createMessageId("-a");
+          addMessage({
+            id: replyMsgId,
+            sender: "golu",
+            text: `⚠️ PDF generation encountered an issue, but here is your content:\n\n${documentContent}`,
+            provider: "gemini",
+          });
+        } finally {
+          setAppState("idle");
+        }
+        return;
+      }
+
+
+
       if (commandResult.isBrowserAction) {
         const links = commandResult.url
           ? [{ label: "Open link", url: commandResult.url }]
@@ -548,6 +711,14 @@ export default function App() {
           }`;
         }
 
+        if (commandResult.url && commandResult.kind !== "spotify-connect") {
+          try {
+            window.open(commandResult.url, "_blank", "noopener,noreferrer");
+          } catch (e) {
+            console.warn("Could not automatically open URL:", e);
+          }
+        }
+
         const cmdMsgId = createMessageId("-a");
         addMessage({
           id: cmdMsgId,
@@ -566,8 +737,13 @@ export default function App() {
       }
 
       try {
+        const pdfContext = activePdfRef.current
+          ? getRelevantPdfContext(activePdfRef.current, prompt)
+          : undefined;
+
         const response = await getAssistantResponse(prompt, history, {
           useWebSearch: shouldUseWebSearch(prompt),
+          pdfContext,
         });
         const replyText = stabilizeAssistantText(response.text);
         const replyMsgId = createMessageId("-a");
@@ -643,6 +819,12 @@ export default function App() {
     };
 
     recognition.onerror = (event: any) => {
+      // Don't show system error message for normal silence timeouts or explicit user cancellation
+      if (event?.error === "no-speech" || event?.error === "aborted") {
+        setIsDictating(false);
+        setAppState("idle");
+        return;
+      }
       dictationHadErrorRef.current = true;
       addMessage({
         id: createMessageId("-speech-err"),
@@ -728,11 +910,18 @@ export default function App() {
       };
 
       session.onCommand = (url) => {
+        if (url) {
+          try {
+            window.open(url, "_blank", "noopener,noreferrer");
+          } catch (e) {
+            console.warn("Could not automatically open URL:", e);
+          }
+        }
         addMessage({
           id: createMessageId("-cmd"),
           sender: "golu",
           provider: "browser",
-          text: "I found what you needed.",
+          text: "I have opened this for you.",
           links: [{ label: "Open link", url }],
         });
       };
@@ -986,9 +1175,12 @@ export default function App() {
         className="absolute inset-x-3 bottom-24 top-[4.75rem] z-20 flex flex-col overflow-hidden rounded-2xl border border-white/10 bg-black/60 shadow-2xl shadow-black/40 backdrop-blur-2xl sm:left-auto sm:right-4 sm:w-[460px] sm:max-w-[calc(100vw-2rem)] md:bottom-28 md:right-6 md:top-20"
       >
         <div className="flex shrink-0 items-center justify-between border-b border-white/10 bg-black/30 px-4 py-3">
-          <div className="flex items-center gap-2 text-sm font-semibold text-white/90">
-            <Bot size={18} className="text-cyan-200" />
-            Assistant Chat
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 text-sm font-semibold text-white/90">
+              <Bot size={18} className="text-cyan-200" />
+              Assistant Chat
+            </div>
+
           </div>
           <div className="flex items-center gap-2 text-xs">
             {appState === "processing" && <Loader2 size={14} className="animate-spin text-cyan-300" />}
@@ -1053,6 +1245,14 @@ export default function App() {
                       <div className="flex items-center gap-1">
                         <button
                           type="button"
+                          onClick={() => exportMessageAsPdf(message.text)}
+                          className="rounded-full p-1 text-xs text-white/40 hover:bg-white/10 hover:text-cyan-200 transition-all"
+                          title="Save this answer as PDF"
+                        >
+                          <FileText size={12} />
+                        </button>
+                        <button
+                          type="button"
                           onClick={() => {
                             if (isThisPlaying) {
                               stopSpeaking();
@@ -1079,6 +1279,42 @@ export default function App() {
                   <div className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                     <LinkifiedText text={message.text} />
                   </div>
+
+                  {message.generatedPdf && (
+                    <div className="mt-3.5 rounded-xl border border-violet-400/30 bg-violet-950/40 p-3 shadow-inner">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 truncate">
+                          <FileText size={16} className="text-violet-400 shrink-0" />
+                          <span className="text-xs font-semibold text-violet-100 truncate">
+                            {message.generatedPdf.filename}
+                          </span>
+                          <span className="text-[10px] text-violet-400/70 font-mono shrink-0">
+                            ({message.generatedPdf.sizeKb} KB)
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => openPdfInNewTab(message.generatedPdf!.url)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1 text-xs font-medium text-white/80 transition hover:bg-white/15"
+                            title="Preview PDF"
+                          >
+                            <ExternalLink size={12} />
+                            <span>Preview</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => downloadPdf(message.generatedPdf!.url, message.generatedPdf!.filename)}
+                            className="inline-flex items-center gap-1 rounded-lg border border-violet-400/40 bg-violet-500/30 px-2.5 py-1 text-xs font-semibold text-violet-100 shadow-sm transition hover:bg-violet-500/50"
+                            title="Download PDF"
+                          >
+                            <Download size={12} />
+                            <span>Download</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                   {message.links?.length ? (
                     <div className="mt-4 flex flex-wrap gap-2">
                       {message.links.map((link) => (
@@ -1110,58 +1346,120 @@ export default function App() {
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: isReady ? 1 : 0, y: isReady ? 0 : 20 }}
         transition={{ duration: 0.9, delay: 0.65 }}
-        className="absolute bottom-0 left-0 z-30 flex w-full shrink-0 flex-col items-center justify-center gap-3 px-3 pb-5 md:pb-7"
+        className="absolute bottom-0 left-0 z-30 flex w-full shrink-0 flex-col items-center justify-center gap-2.5 px-3 pb-5 md:pb-7"
       >
         <AnimatePresence>
           {showTextInput && (
-            <motion.form
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 20 }}
-              onSubmit={handleTextSubmit}
-              className="flex w-full max-w-3xl items-center gap-2 rounded-full border border-white/10 bg-[#0a0a0f]/85 p-1.5 pl-3 shadow-[0_0_30px_rgba(255,255,255,0.06)] backdrop-blur-xl"
-            >
-              <button
-                type="button"
-                onClick={isDictating ? stopDictation : startDictation}
-                className={`rounded-full p-2.5 transition-colors ${
-                  isDictating
-                    ? "bg-red-500/20 text-red-300"
-                    : "bg-white/5 text-white/70 hover:bg-white/10"
-                }`}
-                title={isDictating ? "Stop voice input" : "Voice input"}
+            <div className="flex w-full max-w-3xl flex-col items-center gap-2">
+              {/* Attached PDF Indicator */}
+              {activePdf && (
+                <motion.div
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 8 }}
+                  className="flex w-full items-center justify-between rounded-xl border border-violet-400/30 bg-[#0a0a14]/90 px-3.5 py-1.5 text-xs shadow-lg backdrop-blur-xl"
+                >
+                  <div className="flex items-center gap-2 text-violet-200 truncate">
+                    <FileText size={14} className="text-violet-400 shrink-0" />
+                    <span className="font-medium truncate">{activePdf.title}.pdf</span>
+                    <span className="text-violet-400/70 font-mono text-[11px] shrink-0">
+                      ({activePdf.totalPages} {activePdf.totalPages === 1 ? "page" : "pages"} · {activePdf.sizeKb} KB)
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActivePdf(null)}
+                    className="rounded-full p-1 text-violet-300 hover:bg-violet-800/40 hover:text-white transition-colors ml-2 shrink-0"
+                    title="Remove attached PDF"
+                  >
+                    <X size={13} />
+                  </button>
+                </motion.div>
+              )}
+
+              <motion.form
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 20 }}
+                onSubmit={handleTextSubmit}
+                className="flex w-full items-center gap-2 rounded-full border border-white/10 bg-[#0a0a0f]/85 p-1.5 pl-3 shadow-[0_0_30px_rgba(255,255,255,0.06)] backdrop-blur-xl"
               >
-                {isDictating ? <MicOff size={18} /> : <Mic size={18} />}
-              </button>
-              <input
-                type="text"
-                value={textInput}
-                onChange={(e) => setTextInput(e.target.value)}
-                placeholder="Ask anything..."
-                className="min-w-0 flex-1 border-none bg-transparent text-sm text-white outline-none placeholder:text-white/35 md:text-base"
-                autoFocus
-              />
-              <button
-                type="button"
-                onClick={() => setTextInput((value) => value || "Search latest AI news on Google")}
-                className="hidden rounded-full bg-white/5 p-2.5 text-white/60 transition-colors hover:bg-white/10 md:block"
-                title="Add a Google search prompt"
-              >
-                <Search size={18} />
-              </button>
-              <button
-                type="submit"
-                disabled={!textInput.trim() || appState === "processing"}
-                className="rounded-full bg-violet-500 p-2.5 text-white transition-colors hover:bg-violet-600 disabled:cursor-not-allowed disabled:opacity-45"
-                title="Send"
-              >
-                {appState === "processing" ? (
-                  <Loader2 size={18} className="animate-spin" />
-                ) : (
-                  <Send size={18} />
-                )}
-              </button>
-            </motion.form>
+                {/* PDF File Attachment Input */}
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  accept="application/pdf"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) void handlePdfFile(file);
+                    e.target.value = "";
+                  }}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isUploadingPdf}
+                  className={`rounded-full p-2.5 transition-colors ${
+                    activePdf
+                      ? "bg-violet-500/30 text-violet-200 border border-violet-400/40"
+                      : "bg-white/5 text-white/70 hover:bg-white/10 hover:text-cyan-200"
+                  }`}
+                  title={
+                    activePdf
+                      ? `Active PDF: ${activePdf.title}.pdf (Click to change)`
+                      : "Attach PDF for Q&A (Max 30MB)"
+                  }
+                >
+                  {isUploadingPdf ? (
+                    <Loader2 size={18} className="animate-spin text-cyan-300" />
+                  ) : (
+                    <Paperclip size={18} />
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={isDictating ? stopDictation : startDictation}
+                  className={`rounded-full p-2.5 transition-colors ${
+                    isDictating
+                      ? "bg-red-500/20 text-red-300"
+                      : "bg-white/5 text-white/70 hover:bg-white/10"
+                  }`}
+                  title={isDictating ? "Stop voice input" : "Voice input"}
+                >
+                  {isDictating ? <MicOff size={18} /> : <Mic size={18} />}
+                </button>
+                <input
+                  type="text"
+                  value={textInput}
+                  onChange={(e) => setTextInput(e.target.value)}
+                  placeholder={activePdf ? `Ask questions about ${activePdf.title}.pdf...` : "Ask anything..."}
+                  className="min-w-0 flex-1 border-none bg-transparent text-sm text-white outline-none placeholder:text-white/35 md:text-base"
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  onClick={() => setTextInput((value) => value || "Search latest AI news on Google")}
+                  className="hidden rounded-full bg-white/5 p-2.5 text-white/60 transition-colors hover:bg-white/10 md:block"
+                  title="Add a Google search prompt"
+                >
+                  <Search size={18} />
+                </button>
+                <button
+                  type="submit"
+                  disabled={!textInput.trim() || appState === "processing"}
+                  className="rounded-full bg-violet-500 p-2.5 text-white transition-colors hover:bg-violet-600 disabled:cursor-not-allowed disabled:opacity-45"
+                  title="Send"
+                >
+                  {appState === "processing" ? (
+                    <Loader2 size={18} className="animate-spin" />
+                  ) : (
+                    <Send size={18} />
+                  )}
+                </button>
+              </motion.form>
+            </div>
           )}
         </AnimatePresence>
 

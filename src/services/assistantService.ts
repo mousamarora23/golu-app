@@ -55,6 +55,13 @@ export interface ChatHistoryItem {
   text: string;
 }
 
+export interface GeneratedPdf {
+  title: string;
+  filename: string;
+  url: string;
+  sizeKb: number;
+}
+
 export interface AssistantResponse {
   text: string;
   provider: "openai" | "gemini" | "live";
@@ -78,6 +85,7 @@ export async function getAssistantResponse(
   history: ChatHistoryItem[],
   options: {
     useWebSearch?: boolean;
+    pdfContext?: string;
   } = {},
 ): Promise<AssistantResponse> {
   const userContext = loadUserContext();
@@ -90,6 +98,7 @@ export async function getAssistantResponse(
       message,
       history,
       useWebSearch: options.useWebSearch,
+      pdfContext: options.pdfContext,
       clientTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       systemInstruction: getSystemInstruction(personality, userContext),
     }),
@@ -187,3 +196,5 @@ export async function deleteSyncedMemory(id: string): Promise<LongTermMemory[]> 
   }
   return Array.isArray(data.memories) ? data.memories : [];
 }
+
+

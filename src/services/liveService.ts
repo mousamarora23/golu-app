@@ -125,7 +125,7 @@ export class LiveSessionManager {
                 }
               }
             ]
-          }]
+          }],
         },
         callbacks: {
           onopen: () => {

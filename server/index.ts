@@ -241,6 +241,8 @@ app.delete("/api/memory/:id", async (req, res) => {
   res.json({ memories });
 });
 
+
+
 app.post("/api/chat", async (req, res) => {
   const body = req.body as {
     message?: string;
@@ -248,6 +250,7 @@ app.post("/api/chat", async (req, res) => {
     systemInstruction?: string;
     useWebSearch?: boolean;
     clientTimezone?: string;
+    pdfContext?: string;
   };
 
   const message = (body.message || "").trim();
@@ -283,6 +286,7 @@ app.post("/api/chat", async (req, res) => {
           searchResults: search?.results || [],
           searchError: search?.error,
           liveContext: live,
+          pdfContext: body.pdfContext,
         });
 
         res.json({
@@ -299,7 +303,25 @@ app.post("/api/chat", async (req, res) => {
         console.error("Gemini server error:", geminiError);
         // If OpenAI is also configured, try fallback to OpenAI
         if (!isConfigured(openai.apiKey)) {
-          throw geminiError;
+          const isRateLimit =
+            (geminiError as any)?.status === 429 ||
+            String(geminiError).includes("429") ||
+            String(geminiError).toLowerCase().includes("quota");
+
+          const fallbackMsg = isRateLimit
+            ? "I am receiving a high volume of requests on the Gemini free tier right now. Please wait a few seconds and try again."
+            : `Assistant processing encountered an issue: ${(geminiError as Error)?.message || "Please try again."}`;
+
+          res.json({
+            text: fallbackMsg,
+            provider: "gemini",
+            model: gemini.model,
+            searchResults: search?.results || [],
+            searchConfigured: search?.configured || false,
+            searchError: search?.error,
+            liveContext: live,
+          });
+          return;
         }
       }
     }
@@ -312,6 +334,7 @@ app.post("/api/chat", async (req, res) => {
         searchResults: search?.results || [],
         searchError: search?.error,
         liveContext: live,
+        pdfContext: body.pdfContext,
       });
 
       res.json({
@@ -455,6 +478,7 @@ async function askGemini(args: {
   searchResults: SearchResult[];
   searchError?: string;
   liveContext?: LiveContext | null;
+  pdfContext?: string;
 }) {
   const ai = new GoogleGenAI({ apiKey: args.apiKey });
   const recentHistory = args.history.slice(-20);
@@ -482,6 +506,9 @@ async function askGemini(args: {
   }
 
   let prompt = args.message;
+  if (args.pdfContext) {
+    prompt = `[ATTACHED DOCUMENT CONTENT]:\n${args.pdfContext}\n\n[USER MESSAGE]:\n${args.message}`;
+  }
   if (args.liveContext?.answer) {
     prompt = `[Verified Live Data: ${args.liveContext.answer}]\n${prompt}`;
   } else if (args.liveContext) {
@@ -495,6 +522,7 @@ async function askGemini(args: {
   }
 
   const systemInstruction = `${args.systemInstruction}\n\nREAL-TIME ACCURACY RULES:\n- For current time, date, weather, temperature, or live factual queries, use the verified live data context first.\n- Keep answers natural, warm, clear, and well-structured.`;
+
   const chat = ai.chats.create({
     model: args.model || "gemini-2.5-flash",
     config: {
@@ -515,6 +543,7 @@ async function askOpenAI(args: {
   searchResults: SearchResult[];
   searchError?: string;
   liveContext?: LiveContext | null;
+  pdfContext?: string;
 }) {
   const openai = getOpenAIConfig();
   const recentHistory = args.history
@@ -522,6 +551,7 @@ async function askOpenAI(args: {
     .map((item) => `${item.sender === "user" ? "User" : "Golu"}: ${item.text}`)
     .join("\n");
 
+  const pdfContextText = args.pdfContext ? `\n\n[ATTACHED DOCUMENT CONTENT]:\n${args.pdfContext}` : "";
   const searchContext = args.searchResults.length
     ? `\n\nGoogle search results for context:\n${args.searchResults
         .map(
@@ -539,6 +569,7 @@ async function askOpenAI(args: {
 
   const input = [
     recentHistory ? `Recent conversation:\n${recentHistory}` : "",
+    pdfContextText,
     liveContextText,
     searchContext,
     searchErrorContext,
@@ -1333,9 +1364,11 @@ async function start() {
   });
 }
 
-start().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+if (!process.env.VERCEL) {
+  start().catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
+}
 
 export default app;
